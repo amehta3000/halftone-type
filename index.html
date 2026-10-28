@@ -1,3 +1,8 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Halftone Type</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -27,7 +32,7 @@
     --line-on-ink: rgba(19, 19, 21, 0.3); --muted: #8f8c94; --chip: rgba(30, 30, 34, 0.78);
     color-scheme: dark;
   }
-  html, body { height: 100%; }
+  html, body { height: 100%; margin: 0; }
   body { background: var(--paper); color: var(--ink); overflow: hidden; }
   #root { height: 100%; }
   .stage { position: relative; height: 100%; width: 100%; cursor: text; }
@@ -73,7 +78,8 @@
   .caption b { color: var(--ink); font-weight: 500; font-variant-numeric: tabular-nums; }
   @media (max-width: 480px) { .shapes button span { display: none; } .shapes button { padding: 8px; } }
 </style>
-
+</head>
+<body>
 <div id="root"></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
@@ -577,3 +583,5 @@ function HalftoneStage() {
 
 ReactDOM.createRoot(document.getElementById("root")).render(h(HalftoneStage));
 </script>
+</body>
+</html>

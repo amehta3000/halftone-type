@@ -8,4 +8,6 @@ A graph-paper grid that turns what you type, or the current time, into letters b
 
 Three shapes: **Dots** and **Squares** grow from interior intersections, **Tiles** fill whole cells with corners rounded where the letter's edge passes.
 
+Live: https://amehta3000.github.io/halftone-type/
+
 It's a single `index.html` using React 18 from a CDN. Open it in a browser, no build step.
