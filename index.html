@@ -9,7 +9,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=IBM+Plex+Mono:wght@400;500&display=swap">
 <style>
-  /* Layout: one full-screen sheet of graph paper; shapes live on interior intersections and cells, mode and shape switchers float along the top edge, a quiet caption strip sits on the bottom edge. */
+  /* Layout: one full-screen sheet of graph paper; shapes live on interior intersections and cells, mode and shape switchers float along the top edge, the caption strip with the grid-scale control sits on the bottom edge. */
   :root {
     --paper: #ecebe7;
     --ink: #221d1e;
@@ -35,8 +35,8 @@
   html, body { height: 100%; margin: 0; }
   body { background: var(--paper); color: var(--ink); overflow: hidden; }
   #root { height: 100%; }
-  .stage { position: relative; height: 100%; width: 100%; cursor: text; }
-  .stage[data-mode="time"] { cursor: default; }
+  .stage { position: relative; height: 100%; width: 100%; cursor: text; touch-action: none; }
+  .stage[data-mode="time"], .stage[data-mode="extended"] { cursor: default; }
   .stage canvas { display: block; width: 100%; height: 100%; }
   .capture {
     position: absolute; left: 0; top: 0; width: 1px; height: 1px;
@@ -50,8 +50,8 @@
     padding-right: max(16px, env(safe-area-inset-right, 0px));
     pointer-events: none;
   }
-  .segmented {
-    display: flex; gap: 2px; padding: 3px; pointer-events: auto;
+  .segmented, .scale {
+    display: flex; align-items: center; gap: 2px; padding: 3px; pointer-events: auto;
     background: var(--chip); border: 1px solid var(--line); border-radius: 999px;
     backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
   }
@@ -61,22 +61,41 @@
     background: transparent; color: var(--muted);
     font: 500 11px/1 var(--font-ui); letter-spacing: 0.08em; text-transform: uppercase;
   }
-  .segmented button:hover { color: var(--ink); }
+  .segmented button:hover, .scale button:hover { color: var(--ink); }
   .segmented button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
-  .segmented button:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+  .segmented button:focus-visible, .scale button:focus-visible, .scale input:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
   .shapes button { padding-left: 9px; }
   .shapes svg { width: 12px; height: 12px; fill: currentColor; }
   .caption {
     position: absolute; left: 0; right: 0; bottom: 0;
-    display: flex; justify-content: space-between; align-items: baseline; gap: 16px;
+    display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 16px;
     padding-left: max(16px, env(safe-area-inset-left, 0px));
     padding-right: max(16px, env(safe-area-inset-right, 0px));
     padding-block: 10px max(12px, env(safe-area-inset-bottom, 0px));
     font: 500 11px/1.4 var(--font-ui); letter-spacing: 0.08em; text-transform: uppercase;
     color: var(--muted); pointer-events: none;
   }
+  .caption > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .caption .hint { text-align: right; }
   .caption b { color: var(--ink); font-weight: 500; font-variant-numeric: tabular-nums; }
-  @media (max-width: 480px) { .shapes button span { display: none; } .shapes button { padding: 8px; } }
+  .scale { gap: 6px; padding: 3px 6px; }
+  .scale button {
+    width: 26px; height: 26px; border: 0; border-radius: 999px; cursor: pointer;
+    background: transparent; color: var(--muted); display: grid; place-items: center; padding: 0;
+  }
+  .scale button svg { width: 12px; height: 12px; fill: currentColor; }
+  .scale input {
+    width: clamp(90px, 18vw, 200px); margin: 0; accent-color: var(--ink); cursor: pointer;
+  }
+  @media (max-width: 640px) {
+    .caption { grid-template-columns: 1fr auto; }
+    .caption .hint { display: none; }
+  }
+  @media (max-width: 480px) {
+    .shapes button span { display: none; }
+    .shapes button { padding: 8px; }
+    .modes button { padding: 6px 8px; }
+  }
 </style>
 </head>
 <body>
@@ -90,11 +109,16 @@ const { useEffect, useRef, useState, createElement: h } = React;
 const GROW_IN = 700;      // ms for a shape to swell to full size
 const HOLD = 150;         // ms a letter stays formed when there is no key release to wait for (phones, shape switch)
 const GROW_OUT = 420;     // ms for a shape to shrink back
-const SPREAD = 320;       // ms of stagger across the letter, centre first
-const SAMPLE = 12;        // offscreen pixels per grid cell when sampling the glyph
+const SPREAD = 320;       // ms of stagger across a letter, centre first
+const MASK_MAX = 320;     // longest side of a letter's ink mask, in mask pixels
+
+// Grid density is the number of cells across the shorter side of the screen.
+const DENSITY_MIN = 5, DENSITY_MAX = 48;
+const DEFAULT_DENSITY = { type: 12, write: 40, time: 22, extended: 30 };
 
 const MODES = [
   { id: "type", label: "Type" },
+  { id: "write", label: "Write" },
   { id: "time", label: "Time" },
   { id: "extended", label: "Extended" },
 ];
@@ -109,7 +133,8 @@ const SHAPES = [
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 const hour12 = new Intl.DateTimeFormat(undefined, { hour: "numeric" }).resolvedOptions().hour12;
 
-const clamp01 = (v) => Math.max(0, Math.min(1, v));
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const clamp01 = (v) => clamp(v, 0, 1);
 const smoothstep = (a, b, v) => { const t = clamp01((v - a) / (b - a)); return t * t * (3 - 2 * t); };
 const easeOutBack = (t) => { const c = 1.4; return 1 + (c + 1) * Math.pow(t - 1, 3) + c * Math.pow(t - 1, 2); };
 const easeInCubic = (t) => t * t * t;
@@ -118,78 +143,80 @@ function loadPref(key, options, fallback) {
   try { const v = localStorage.getItem(key); if (options.some((o) => o.id === v)) return v; } catch (e) {}
   return fallback;
 }
-function savePref(key, v) { try { localStorage.setItem(key, v); } catch (e) {} }
-
-// Grid geometry: square cells, centred so the margins on both sides match.
-// The clock needs a finer grid to fit four (or six) digits at a readable size.
-function makeGrid(w, hgt, mode) {
-  const s = mode === "extended" ? Math.max(11, Math.min(w, hgt) / 30)
-    : mode === "time" ? Math.max(14, Math.min(w, hgt) / 22)
-    : Math.max(26, Math.min(w, hgt) / 12);
-  const cols = Math.max(4, Math.floor(w / s));
-  const rows = Math.max(4, Math.floor(hgt / s));
-  return { s, cols, rows, ox: (w - cols * s) / 2, oy: (hgt - rows * s) / 2 };
+function loadJSON(key, fallback) {
+  try { const v = JSON.parse(localStorage.getItem(key)); if (v != null) return v; } catch (e) {}
+  return fallback;
 }
+function savePref(key, v) { try { localStorage.setItem(key, typeof v === "string" ? v : JSON.stringify(v)); } catch (e) {} }
 
 const glyphFamily = () => getComputedStyle(document.documentElement).getPropertyValue("--font-glyph");
 
-function sampleCanvas(grid) {
-  const c = document.createElement("canvas");
-  c.width = grid.cols * SAMPLE; c.height = grid.rows * SAMPLE;
-  return c.getContext("2d", { willReadFrequently: true });
+// One scratch canvas for measuring and rasterising letters.
+const scratch = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
+function measure(text, size, align = "left") {
+  scratch.font = `${size}px ${glyphFamily()}`;
+  scratch.textAlign = align;
+  return scratch.measureText(text);
 }
 
-// Measure how much ink falls in the square around each intersection (pt) and
-// inside each grid cell (cell). Values are 0..1, both indexed j * (cols + 1) + i;
-// a cell is named by its top-left intersection.
-function coverFromCanvas(ctx, grid) {
-  const { cols, rows } = grid;
-  const cw = cols * SAMPLE, chh = rows * SAMPLE;
-  const data = ctx.getImageData(0, 0, cw, chh).data;
-  const boxAverage = (x0, y0) => {
-    let sum = 0, n = 0;
-    for (let yy = Math.max(0, y0); yy < Math.min(chh, y0 + SAMPLE); yy++) {
-      for (let xx = Math.max(0, x0); xx < Math.min(cw, x0 + SAMPLE); xx++) {
-        sum += data[(yy * cw + xx) * 4 + 3]; n++;
-      }
-    }
-    return n ? sum / (n * 255) : 0;
-  };
-  const half = SAMPLE / 2;
-  const pt = new Float32Array((cols + 1) * (rows + 1));
-  const cell = new Float32Array((cols + 1) * (rows + 1));
-  for (let j = 0; j <= rows; j++) {
-    for (let i = 0; i <= cols; i++) {
-      const idx = j * (cols + 1) + i;
-      pt[idx] = boxAverage(Math.round(i * SAMPLE - half), Math.round(j * SAMPLE - half));
-      if (i < cols && j < rows) cell[idx] = boxAverage(i * SAMPLE, j * SAMPLE);
+// Rasterise one character at a fixed place on screen (CSS pixels) and keep a
+// summed-area table of its ink, so coverage of any box can be read in O(1)
+// whatever size the grid happens to be.
+function renderMask(ch, size, x, y, align) {
+  const m = measure(ch, size, align);
+  const pad = 2;
+  const x0 = x - m.actualBoundingBoxLeft - pad, x1 = x + m.actualBoundingBoxRight + pad;
+  const y0 = y - m.actualBoundingBoxAscent - pad, y1 = y + m.actualBoundingBoxDescent + pad;
+  const bw = x1 - x0, bh = y1 - y0;
+  const k = Math.min(1, MASK_MAX / Math.max(bw, bh));
+  const W = Math.max(1, Math.ceil(bw * k)), H = Math.max(1, Math.ceil(bh * k));
+  const c = scratch.canvas;
+  c.width = W; c.height = H;
+  scratch.font = `${size}px ${glyphFamily()}`;
+  scratch.textAlign = align;
+  scratch.setTransform(k, 0, 0, k, -x0 * k, -y0 * k);
+  scratch.fillStyle = "#000";
+  scratch.fillText(ch, x, y);
+  scratch.setTransform(1, 0, 0, 1, 0, 0);
+  const data = scratch.getImageData(0, 0, W, H).data;
+  const W1 = W + 1;
+  const sat = new Float64Array(W1 * (H + 1));
+  for (let yy = 0; yy < H; yy++) {
+    let row = 0;
+    for (let xx = 0; xx < W; xx++) {
+      row += data[(yy * W + xx) * 4 + 3] / 255;
+      sat[(yy + 1) * W1 + xx + 1] = sat[yy * W1 + xx + 1] + row;
     }
   }
-  return { pt, cell };
+  return { x0, y0, x1, y1, k, W, H, sat, cx: (x0 + x1) / 2, cy: (y0 + y1) / 2, rad: 0.5 * Math.hypot(bw, bh) };
 }
 
-// One typed character, scaled to fill the grid and centred on its own ink.
-function sampleGlyph(ch, grid) {
-  const { cols, rows } = grid;
-  const ctx = sampleCanvas(grid);
-  const cw = cols * SAMPLE, chh = rows * SAMPLE;
-  const family = glyphFamily();
+// Bilinear read of the summed-area table, so coverage changes smoothly as the grid moves.
+function integral(g, u, v) {
+  u = clamp(u, 0, g.W); v = clamp(v, 0, g.H);
+  const u0 = Math.floor(u), v0 = Math.floor(v);
+  const u1 = Math.min(u0 + 1, g.W), v1 = Math.min(v0 + 1, g.H);
+  const fu = u - u0, fv = v - v0, W1 = g.W + 1, S = g.sat;
+  const a = S[v0 * W1 + u0], b = S[v0 * W1 + u1], c = S[v1 * W1 + u0], d = S[v1 * W1 + u1];
+  return (a * (1 - fu) + b * fu) * (1 - fv) + (c * (1 - fu) + d * fu) * fv;
+}
 
-  let size = (rows - 2) * SAMPLE * 0.92;
-  ctx.font = `${size}px ${family}`;
-  let m = ctx.measureText(ch);
-  const maxW = (cols - 2) * SAMPLE * 0.9, maxH = (rows - 2) * SAMPLE * 0.82;
-  const gw = m.actualBoundingBoxLeft + m.actualBoundingBoxRight;
-  const gh = m.actualBoundingBoxAscent + m.actualBoundingBoxDescent;
-  size *= Math.min(gw ? maxW / gw : 1, gh ? maxH / gh : 1);
-  ctx.font = `${size}px ${family}`;
-  m = ctx.measureText(ch);
+// Share of the box (CSS pixels) covered by this letter's ink, 0..1.
+function boxCover(g, ax, ay, bx, by) {
+  if (bx <= g.x0 || ax >= g.x1 || by <= g.y0 || ay >= g.y1) return 0;
+  const k = g.k;
+  const u0 = (ax - g.x0) * k, u1 = (bx - g.x0) * k, v0 = (ay - g.y0) * k, v1 = (by - g.y0) * k;
+  const sum = integral(g, u1, v1) - integral(g, u0, v1) - integral(g, u1, v0) + integral(g, u0, v0);
+  return sum / ((bx - ax) * (by - ay) * k * k);
+}
 
-  const x = cw / 2 - (m.actualBoundingBoxRight - m.actualBoundingBoxLeft) / 2;
-  const y = chh / 2 + (m.actualBoundingBoxAscent - m.actualBoundingBoxDescent) / 2;
-  ctx.fillStyle = "#000";
-  ctx.fillText(ch, x, y);
-  return coverFromCanvas(ctx, grid);
+// Type mode: one character, scaled to fill the screen and centred on its own ink.
+function typeSpec(ch, w, hgt) {
+  const m = measure(ch, 100);
+  const L = m.actualBoundingBoxLeft, R = m.actualBoundingBoxRight;
+  const A = m.actualBoundingBoxAscent, D = m.actualBoundingBoxDescent;
+  const k = Math.min((L + R) ? (w * 0.8) / (L + R) : 1, (A + D) ? (hgt * 0.66) / (A + D) : 1);
+  return { ch, size: 100 * k, x: w / 2 - ((R - L) * k) / 2, y: hgt / 2 + ((A - D) * k) / 2, align: "left" };
 }
 
 // Clock text: one line, or stacked when the screen is tall. Without seconds the
@@ -206,45 +233,66 @@ function clockLines(date, tall, seconds) {
 }
 
 // Fixed character slots for the clock so a changing digit never shifts its neighbours.
-// Returns one placement per slot, in sample-canvas pixels.
-function layoutClock(lines, grid) {
-  const { cols, rows } = grid;
-  const ctx = sampleCanvas(grid);
-  const family = glyphFamily();
+function clockSpecs(lines, w, hgt) {
   const base = 100;
-  ctx.font = `${base}px ${family}`;
-  const digitW = Math.max(...[..."0123456789"].map((d) => ctx.measureText(d).width));
-  const colonW = ctx.measureText(":").width * 1.1;
+  measure("0", base);
+  const digitW = Math.max(...[..."0123456789"].map((d) => scratch.measureText(d).width));
+  const colonW = scratch.measureText(":").width * 1.1;
   const slotW = (c) => (c === ":" || c === " " ? colonW : digitW);
-  const m = ctx.measureText("0123456789");
+  const m = scratch.measureText("0123456789");
   const asc = m.actualBoundingBoxAscent, desc = m.actualBoundingBoxDescent;
   const lineH = asc + desc, gap = lineH * 0.22, track = base * 0.04;
 
   const lineW = lines.map((l) => [...l].reduce((sum, c) => sum + slotW(c), 0) + track * (l.length - 1));
   const totalW = Math.max(...lineW);
   const totalH = lines.length * lineH + (lines.length - 1) * gap;
-  const k = Math.min(((cols - 2) * SAMPLE * 0.92) / totalW, ((rows - 2) * SAMPLE * 0.8) / totalH);
+  const k = Math.min((w * 0.86) / totalW, (hgt * 0.68) / totalH);
 
-  const cw = cols * SAMPLE, chh = rows * SAMPLE;
-  const slots = [];
+  const specs = [];
   lines.forEach((line, li) => {
-    const top = chh / 2 - (totalH * k) / 2 + li * (lineH + gap) * k;
-    let x = cw / 2 - (lineW[li] * k) / 2;
+    const top = hgt / 2 - (totalH * k) / 2 + li * (lineH + gap) * k;
+    let x = w / 2 - (lineW[li] * k) / 2;
     [...line].forEach((c, ci) => {
-      slots.push({ ch: c, key: `${li}:${ci}`, x: x + (slotW(c) * k) / 2, y: top + asc * k, size: base * k });
+      specs.push({ key: `c${li}:${ci}`, ch: c, x: x + (slotW(c) * k) / 2, y: top + asc * k, size: base * k, align: "center" });
       x += (slotW(c) + track) * k;
     });
   });
-  return slots;
+  return specs;
 }
 
-function sampleSlot(slot, grid) {
-  const ctx = sampleCanvas(grid);
-  ctx.font = `${slot.size}px ${glyphFamily()}`;
-  ctx.textAlign = "center";
-  ctx.fillStyle = "#000";
-  ctx.fillText(slot.ch, slot.x, slot.y);
-  return coverFromCanvas(ctx, grid);
+// Write mode: text set left to right from the top-left, wrapping at word breaks.
+// Returns placements plus the text index where each line starts.
+function writeLayout(text, w, hgt) {
+  const size = clamp(Math.min(w, hgt) * 0.22, 56, 240);
+  const lineH = size * 1.08;
+  const left = Math.max(28, w * 0.07), right = w - left;
+  const top = 64, bottom = hgt - 60;
+  const maxLines = Math.max(1, Math.floor((bottom - top) / lineH));
+  measure("M", size);
+  const adv = (c) => scratch.measureText(c).width;
+  const chars = [...text];
+
+  const specs = [], lineStarts = [0];
+  let pen = left, line = 0;
+  const newline = (at) => { line++; pen = left; lineStarts.push(at); };
+  for (let i = 0; i < chars.length; i++) {
+    const c = chars[i];
+    if (c === "\n") { newline(i + 1); continue; }
+    if (c === " ") {
+      if (pen + adv(" ") > right) newline(i + 1); else pen += adv(" ");
+      continue;
+    }
+    const wordStart = i === 0 || chars[i - 1] === " " || chars[i - 1] === "\n";
+    if (wordStart && pen > left) {
+      let ww = 0;
+      for (let j = i; j < chars.length && chars[j] !== " " && chars[j] !== "\n"; j++) ww += adv(chars[j]);
+      if (pen + ww > right) newline(i);
+    }
+    if (pen + adv(c) > right && pen > left) newline(i);
+    specs.push({ key: `w${i}`, ch: c, x: pen, y: top + line * lineH + size * 0.8, size, align: "left" });
+    pen += adv(c);
+  }
+  return { specs, lineStarts, lines: line + 1, maxLines };
 }
 
 function readColors() {
@@ -271,165 +319,260 @@ function formatClock(date, seconds) {
   return date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: seconds ? "2-digit" : undefined });
 }
 
+// Slider position 0..100 maps to density on a log scale; right means bigger cells.
+const SPAN = Math.log(DENSITY_MAX / DENSITY_MIN);
+const densityToSlider = (d) => (Math.log(DENSITY_MAX / d) / SPAN) * 100;
+const sliderToDensity = (v) => DENSITY_MAX * Math.exp((-v / 100) * SPAN);
+
+const MINUS = "M2 5.25h8v1.5H2z";
+const PLUS = "M5.25 2h1.5v3.25H10v1.5H6.75V10h-1.5V6.75H2v-1.5h3.25z";
+
 function HalftoneStage() {
+  const stageRef = useRef(null);
   const canvasRef = useRef(null);
   const inputRef = useRef(null);
   const glyphsRef = useRef([]);
-  const gridRef = useRef(null);
-  const regridRef = useRef(() => {});
+  const sizeRef = useRef({ w: 0, h: 0 });
   const [current, setCurrent] = useState("a");
   const [clock, setClock] = useState(() => formatClock(new Date()));
   const [shape, setShape] = useState(() => loadPref("halftone-shape", SHAPES, "dots"));
   const [mode, setMode] = useState(() => loadPref("halftone-mode", MODES, "type"));
+  const [text, setText] = useState(() => { const t = loadJSON("halftone-write", ""); return typeof t === "string" ? t : ""; });
+  const densitiesRef = useRef({ ...DEFAULT_DENSITY, ...loadJSON("halftone-density", {}) });
+  const [density, setDensityState] = useState(() => densitiesRef.current[mode]);
+  const springRef = useRef({ d: densitiesRef.current[mode], v: 0, target: densitiesRef.current[mode] });
+
   const shapeRef = useRef(shape);
   shapeRef.current = shape;
   const modeRef = useRef(mode);
+  const textRef = useRef(text);
   const lastTypedRef = useRef("a");
+  const syncRef = useRef({});
+
+  const setDensity = (d) => {
+    d = clamp(d, DENSITY_MIN, DENSITY_MAX);
+    springRef.current.target = d;
+    densitiesRef.current[modeRef.current] = d;
+    savePref("halftone-density", densitiesRef.current);
+    setDensityState(d);
+  };
 
   useEffect(() => {
     const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d");
     let colors = readColors();
-    let raf = 0;
-    let clockSig = null; // layout of the clock currently on screen
+    let raf = 0, last = performance.now();
+    let pt = new Float32Array(0), tv = new Float32Array(0), tb = new Int32Array(0);
 
-    // Bring the clock up to date: only slots whose character changed animate.
+    const newGlyph = (spec, now, extra) =>
+      Object.assign(renderMask(spec.ch, spec.size, spec.x, spec.y, spec.align), spec, { start: now, outAt: null }, extra);
+
+    // Bring the slotted letters of one mode (clock digits or written text) in line
+    // with a fresh layout: unchanged letters stay, everything else swaps.
+    const syncSlots = (prefix, specs, now) => {
+      const live = new Map();
+      glyphsRef.current.forEach((g) => { if (g.outAt == null && g.key && g.key.startsWith(prefix)) live.set(g.key, g); });
+      const near = (a, b) => Math.abs(a - b) < 0.5;
+      for (const spec of specs) {
+        const g = live.get(spec.key);
+        if (g) {
+          live.delete(spec.key);
+          if (g.ch === spec.ch && near(g.x, spec.x) && near(g.y, spec.y) && near(g.size, spec.size)) continue;
+          g.outAt = now;
+        }
+        if (spec.ch.trim() !== "") glyphsRef.current.push(newGlyph(spec, now));
+      }
+      live.forEach((g) => { g.outAt = now; });
+    };
+
     const tickClock = () => {
-      if (!isClockMode(modeRef.current) || !gridRef.current) return;
-      const now = performance.now();
+      if (!isClockMode(modeRef.current)) return;
+      const { w, h: hgt } = sizeRef.current;
+      if (!w) return;
       const date = new Date();
       const seconds = modeRef.current === "extended";
-      const lines = clockLines(date, canvas.clientHeight > canvas.clientWidth * 1.15, seconds);
-      const slots = layoutClock(lines, gridRef.current);
-      const sig = lines.map((l) => l.length).join(",");
-      if (sig !== clockSig) {
-        glyphsRef.current.forEach((g) => { if (g.outAt == null) g.outAt = now; });
-        clockSig = sig;
-      }
-      for (const slot of slots) {
-        const live = glyphsRef.current.find((g) => g.slot === slot.key && g.outAt == null);
-        if (live && live.ch === slot.ch) continue;
-        if (live) live.outAt = now;
-        if (slot.ch.trim() !== "") {
-          glyphsRef.current.push({ ch: slot.ch, slot: slot.key, cover: sampleSlot(slot, gridRef.current), start: now, outAt: null });
-        }
-      }
+      syncSlots("c", clockSpecs(clockLines(date, hgt > w * 1.15, seconds), w, hgt), performance.now());
       setClock(formatClock(date, seconds));
     };
 
-    // Rebuild the grid for the current size and mode. Covers are tied to the grid,
-    // so whatever is on screen is re-drawn into the new one.
-    const regrid = () => {
+    // Lay out the written text, scrolling whole lines off the top once the page is full.
+    const syncWrite = () => {
+      if (modeRef.current !== "write") return;
+      const { w, h: hgt } = sizeRef.current;
+      if (!w) return;
+      let t = textRef.current;
+      let lay = writeLayout(t, w, hgt);
+      if (lay.lines > lay.maxLines) {
+        const cut = lay.lineStarts[lay.lines - lay.maxLines];
+        t = [...t].slice(cut).join("");
+        textRef.current = t;
+        setText(t);
+        savePref("halftone-write", t);
+        lay = writeLayout(t, w, hgt);
+      }
+      syncSlots("w", lay.specs, performance.now());
+    };
+
+    const typeGlyph = (ch, now, extra) => {
+      const { w, h: hgt } = sizeRef.current;
+      return newGlyph(typeSpec(ch, w, hgt), now, extra);
+    };
+
+    syncRef.current = { tickClock, syncWrite, typeGlyph };
+
+    // Re-place everything after the window changes size.
+    const relayout = () => {
+      const { w, h: hgt } = sizeRef.current;
+      if (!w) return;
+      glyphsRef.current = glyphsRef.current.map((g) => {
+        if (g.key || g.outAt != null) return g;
+        return Object.assign(newGlyph(typeSpec(g.ch, w, hgt), g.start), { outAt: g.outAt, code: g.code, start: g.start });
+      });
+      tickClock();
+      syncWrite();
+    };
+
+    let relayoutTimer = 0;
+    const resize = () => {
       const dpr = window.devicePixelRatio || 1;
       const w = canvas.clientWidth, hgt = canvas.clientHeight;
       canvas.width = Math.round(w * dpr);
       canvas.height = Math.round(hgt * dpr);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      gridRef.current = makeGrid(w, hgt, modeRef.current);
-      if (isClockMode(modeRef.current)) {
-        glyphsRef.current = [];
-        clockSig = null;
-        tickClock();
-      } else {
-        glyphsRef.current = glyphsRef.current.filter((g) => g.slot == null);
-        glyphsRef.current.forEach((g) => { g.cover = sampleGlyph(g.ch, gridRef.current); });
-      }
-    };
-    regridRef.current = regrid;
-
-    const gridLines = (color) => {
-      const { s, cols, rows, ox, oy } = gridRef.current;
-      const w = canvas.clientWidth, hgt = canvas.clientHeight;
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      for (let i = 0; i <= cols; i++) { const x = Math.round(ox + i * s) + 0.5; ctx.moveTo(x, 0); ctx.lineTo(x, hgt); }
-      for (let j = 0; j <= rows; j++) { const y = Math.round(oy + j * s) + 0.5; ctx.moveTo(0, y); ctx.lineTo(w, y); }
-      ctx.stroke();
+      const first = !sizeRef.current.w;
+      sizeRef.current = { w, h: hgt };
+      clearTimeout(relayoutTimer);
+      if (first) relayout(); else relayoutTimer = setTimeout(relayout, 150);
     };
 
-    // Animated strength (0..1, may overshoot) of one glyph at a given stagger delay.
-    const envelope = (g, now, delay) => {
+    // Animated strength (0..1, may overshoot) of one glyph at a point.
+    const envelope = (g, now, x, y) => {
       if (reducedMotion) return g.outAt != null && now >= g.outAt ? 0 : 1;
+      const delay = clamp01(Math.hypot(x - g.cx, y - g.cy) / g.rad) * SPREAD;
       let e = Math.max(0, easeOutBack(clamp01((now - g.start - delay) / GROW_IN)));
       if (g.outAt != null) e *= 1 - easeInCubic(clamp01((now - g.outAt - delay) / GROW_OUT));
       return e;
     };
 
-    // Circles or squares centred on every interior intersection.
-    const drawPoints = (now, glyphs, square) => {
-      const { s, cols, rows, ox, oy } = gridRef.current;
-      const rBase = Math.max(1.4, s * 0.055);
-      const rMax = s * (square ? 0.44 : 0.5);
-      const cx = cols / 2, cy = rows / 2, maxD = Math.hypot(cx, cy);
-      ctx.beginPath();
-      for (let j = 1; j < rows; j++) {
-        for (let i = 1; i < cols; i++) {
-          const idx = j * (cols + 1) + i;
-          const delay = (Math.hypot(i - cx, j - cy) / maxD) * SPREAD;
-          let v = 0;
-          for (const g of glyphs) {
-            const c = g.cover.pt[idx];
-            if (c > 0.004) v = Math.max(v, Math.pow(c, 0.85) * envelope(g, now, delay));
-          }
-          const r = rBase + v * (rMax - rBase);
-          const x = ox + i * s, y = oy + j * s;
-          if (square) { ctx.rect(x - r, y - r, 2 * r, 2 * r); }
-          else { ctx.moveTo(x + r, y); ctx.arc(x, y, r, 0, Math.PI * 2); }
-        }
-      }
-      ctx.fill();
-    };
-
-    // Whole cells that fill in square, with each corner rounded unless the
-    // intersection at that corner sits deep inside the letter.
-    const drawTiles = (now, glyphs) => {
-      const { s, cols, rows, ox, oy } = gridRef.current;
-      const cx = (cols - 1) / 2, cy = (rows - 1) / 2, maxD = Math.hypot(cx, cy);
-      const stride = cols + 1;
-      ctx.beginPath();
-      for (let j = 1; j < rows - 1; j++) {
-        for (let i = 1; i < cols - 1; i++) {
-          const idx = j * stride + i;
-          const delay = (Math.hypot(i - cx, j - cy) / maxD) * SPREAD;
-          let v = 0, best = null;
-          for (const g of glyphs) {
-            const fill = smoothstep(0.35, 0.6, g.cover.cell[idx]);
-            if (fill <= 0) continue;
-            const e = fill * envelope(g, now, delay);
-            if (e > v) { v = e; best = g; }
-          }
-          if (v < 0.01) continue;
-          const size = s * Math.min(v, 1.06);
-          const x = ox + (i + 0.5) * s - size / 2, y = oy + (j + 0.5) * s - size / 2;
-          const half = size / 2;
-          const p = best.cover.pt;
-          const corner = (k) => half * (1 - smoothstep(0.7, 0.92, p[k]) * clamp01(v));
-          roundRectPath(ctx, x, y, size, size, [
-            corner(idx), corner(idx + 1), corner(idx + stride + 1), corner(idx + stride),
-          ]);
-        }
-      }
-      ctx.fill();
-    };
-
     const frame = (now) => {
-      const w = canvas.clientWidth, hgt = canvas.clientHeight;
+      const dt = Math.min(0.05, (now - last) / 1000);
+      last = now;
+
+      // A slightly bouncy spring carries the grid to its target density.
+      const sp = springRef.current;
+      if (reducedMotion) { sp.d = sp.target; sp.v = 0; }
+      else {
+        sp.v += (170 * (sp.target - sp.d) - 17 * sp.v) * dt;
+        sp.d = clamp(sp.d + sp.v * dt, DENSITY_MIN * 0.8, DENSITY_MAX * 1.2);
+      }
+
+      const { w, h: hgt } = sizeRef.current;
+      const s = Math.min(w, hgt) / sp.d;
+      const cx = w / 2, cy = hgt / 2;
+      const i0 = Math.ceil(-cx / s), i1 = Math.floor((w - cx) / s);
+      const j0 = Math.ceil(-cy / s), j1 = Math.floor((hgt - cy) / s);
+      const nI = i1 - i0 + 1, nJ = j1 - j0 + 1;
+      const X = (i) => cx + i * s, Y = (j) => cy + j * s;
+      const edge = (x, y) => Math.min(x, w - x, y, hgt - y);
+
       ctx.fillStyle = colors.paper;
       ctx.fillRect(0, 0, w, hgt);
+      const gridLines = (color) => {
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        for (let i = i0; i <= i1; i++) { const x = Math.round(X(i)) + 0.5; ctx.moveTo(x, 0); ctx.lineTo(x, hgt); }
+        for (let j = j0; j <= j1; j++) { const y = Math.round(Y(j)) + 0.5; ctx.moveTo(0, y); ctx.lineTo(w, y); }
+        ctx.stroke();
+      };
       gridLines(colors.line);
 
       // Retire glyphs whose last shape has finished shrinking.
       glyphsRef.current = glyphsRef.current.filter((g) => g.outAt == null || now < g.outAt + GROW_OUT + SPREAD + 50);
       const glyphs = glyphsRef.current;
 
+      // Only visit grid points inside a glyph's box, plus half a cell of margin.
+      const range = (g, half) => [
+        Math.max(i0, Math.ceil((g.x0 - half - cx) / s)), Math.min(i1, Math.floor((g.x1 + half - cx) / s)),
+        Math.max(j0, Math.ceil((g.y0 - half - cy) / s)), Math.min(j1, Math.floor((g.y1 + half - cy) / s)),
+      ];
+
       ctx.fillStyle = colors.ink;
       const kind = shapeRef.current;
-      if (kind === "tiles") {
-        drawTiles(now, glyphs);
-        gridLines(colors.lineOnInk);
+
+      if (kind !== "tiles") {
+        // Circles or squares centred on intersections; ones near the screen edge fade away.
+        if (pt.length < nI * nJ) pt = new Float32Array(nI * nJ);
+        pt.fill(0, 0, nI * nJ);
+        const half = s / 2;
+        for (const g of glyphs) {
+          const [a0, a1, b0, b1] = range(g, half);
+          for (let j = b0; j <= b1; j++) {
+            for (let i = a0; i <= a1; i++) {
+              const x = X(i), y = Y(j);
+              const c = boxCover(g, x - half, y - half, x + half, y + half);
+              if (c <= 0.004) continue;
+              const v = Math.pow(c, 0.85) * envelope(g, now, x, y);
+              const idx = (j - j0) * nI + (i - i0);
+              if (v > pt[idx]) pt[idx] = v;
+            }
+          }
+        }
+        const square = kind === "squares";
+        const rBase = Math.max(1.4, s * 0.055);
+        const rMax = s * (square ? 0.44 : 0.5);
+        ctx.beginPath();
+        for (let j = j0; j <= j1; j++) {
+          for (let i = i0; i <= i1; i++) {
+            const x = X(i), y = Y(j);
+            const f = smoothstep(s * 0.3, s * 0.75, edge(x, y));
+            if (f <= 0) continue;
+            const r = (rBase + pt[(j - j0) * nI + (i - i0)] * (rMax - rBase)) * f;
+            if (square) ctx.rect(x - r, y - r, 2 * r, 2 * r);
+            else { ctx.moveTo(x + r, y); ctx.arc(x, y, r, 0, Math.PI * 2); }
+          }
+        }
+        ctx.fill();
       } else {
-        drawPoints(now, glyphs, kind === "squares");
+        // Whole cells that fill in square, with each corner rounded unless the
+        // intersection at that corner sits deep inside the letter.
+        const nC = (nI - 1) * (nJ - 1);
+        if (tv.length < nC) { tv = new Float32Array(nC); tb = new Int32Array(nC); }
+        tv.fill(0, 0, nC);
+        glyphs.forEach((g, gi) => {
+          const [a0, a1, b0, b1] = range(g, s);
+          for (let j = b0; j < Math.min(b1 + 1, j1); j++) {
+            for (let i = a0; i < Math.min(a1 + 1, i1); i++) {
+              const x = X(i), y = Y(j);
+              const fill = smoothstep(0.35, 0.6, boxCover(g, x, y, x + s, y + s));
+              if (fill <= 0) continue;
+              const e = fill * envelope(g, now, x + s / 2, y + s / 2);
+              const idx = (j - j0) * (nI - 1) + (i - i0);
+              if (e > tv[idx]) { tv[idx] = e; tb[idx] = gi; }
+            }
+          }
+        });
+        const half = s / 2;
+        ctx.beginPath();
+        for (let j = j0; j < j1; j++) {
+          for (let i = i0; i < i1; i++) {
+            const idx = (j - j0) * (nI - 1) + (i - i0);
+            const v = tv[idx];
+            if (v < 0.01) continue;
+            const mx = X(i) + half, my = Y(j) + half;
+            const f = smoothstep(s * 0.55, s * 1.0, edge(mx, my));
+            if (f <= 0) continue;
+            const size = s * Math.min(v, 1.06) * f;
+            const g = glyphs[tb[idx]];
+            const round = (x, y) => (size / 2) * (1 - smoothstep(0.7, 0.92, boxCover(g, x - half, y - half, x + half, y + half)) * clamp01(v));
+            const x = X(i), y = Y(j);
+            roundRectPath(ctx, mx - size / 2, my - size / 2, size, size, [
+              round(x, y), round(x + s, y), round(x + s, y + s), round(x, y + s),
+            ]);
+          }
+        }
+        ctx.fill();
+        gridLines(colors.lineOnInk);
       }
       raf = requestAnimationFrame(frame);
     };
@@ -440,55 +583,106 @@ function HalftoneStage() {
     const mo = new MutationObserver(themeChanged);
     mo.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "class", "style"] });
 
+    // Scroll, trackpad pinch and two-finger pinch all scale the grid.
+    const stage = stageRef.current;
+    const onWheel = (e) => {
+      e.preventDefault();
+      const rate = e.ctrlKey ? 0.012 : 0.0015;
+      setDensityRef.current(springRef.current.target * Math.exp(e.deltaY * rate));
+    };
+    stage.addEventListener("wheel", onWheel, { passive: false });
+    const touches = new Map();
+    let pinch = null;
+    const onDown = (e) => {
+      touches.set(e.pointerId, [e.clientX, e.clientY]);
+      if (touches.size === 2) {
+        const [a, b] = [...touches.values()];
+        pinch = { dist: Math.hypot(a[0] - b[0], a[1] - b[1]), d: springRef.current.target };
+      }
+    };
+    const onMove = (e) => {
+      if (!touches.has(e.pointerId)) return;
+      touches.set(e.pointerId, [e.clientX, e.clientY]);
+      if (pinch && touches.size === 2) {
+        const [a, b] = [...touches.values()];
+        const dist = Math.hypot(a[0] - b[0], a[1] - b[1]);
+        if (dist > 0) setDensityRef.current(pinch.d * (pinch.dist / dist));
+      }
+    };
+    const onUp = (e) => { touches.delete(e.pointerId); if (touches.size < 2) pinch = null; };
+    stage.addEventListener("pointerdown", onDown);
+    stage.addEventListener("pointermove", onMove);
+    stage.addEventListener("pointerup", onUp);
+    stage.addEventListener("pointercancel", onUp);
+
     let ro, timer;
     const start = () => {
+      resize();
       if (modeRef.current === "type") {
         // Opening state: the letter "a" from the reference sheet, held until the first keystroke.
-        glyphsRef.current = [{ ch: "a", cover: null, start: performance.now(), outAt: null }];
+        glyphsRef.current = [typeGlyph("a", performance.now())];
       }
-      regrid();
-      ro = new ResizeObserver(regrid);
+      tickClock();
+      syncWrite();
+      ro = new ResizeObserver(resize);
       ro.observe(canvas);
       timer = setInterval(tickClock, 200);
       raf = requestAnimationFrame(frame);
     };
-    const family = glyphFamily();
     Promise.race([
-      document.fonts.load(`100px ${family}`, "a0123456789:"),
+      document.fonts.load(`100px ${glyphFamily()}`, "a0123456789:"),
       new Promise((r) => setTimeout(r, 1500)),
     ]).catch(() => {}).then(start);
 
     return () => {
       cancelAnimationFrame(raf);
       clearInterval(timer);
+      clearTimeout(relayoutTimer);
       ro && ro.disconnect();
       mo.disconnect();
       mq.removeEventListener("change", themeChanged);
+      stage.removeEventListener("wheel", onWheel);
+      stage.removeEventListener("pointerdown", onDown);
+      stage.removeEventListener("pointermove", onMove);
+      stage.removeEventListener("pointerup", onUp);
+      stage.removeEventListener("pointercancel", onUp);
     };
   }, []);
 
-  // With a key code, the letter holds until that key is released; without one it leaves on its own.
+  const setDensityRef = useRef(setDensity);
+  setDensityRef.current = setDensity;
+
+  // Type mode. With a key code, the letter holds until that key is released; without one it leaves on its own.
   const play = (ch, code) => {
-    if (!gridRef.current || modeRef.current !== "type") return;
+    if (!sizeRef.current.w || modeRef.current !== "type") return;
     const now = performance.now();
     // Anything still on screen starts shrinking as the new letter grows in.
     glyphsRef.current.forEach((g) => { if (g.outAt == null || g.outAt > now) g.outAt = now; });
     setCurrent(ch);
     lastTypedRef.current = ch;
     if (ch.trim() === "") return;
-    glyphsRef.current.push({
-      ch, code, cover: sampleGlyph(ch, gridRef.current), start: now,
-      outAt: code ? null : now + GROW_IN + SPREAD + HOLD,
-    });
+    glyphsRef.current.push(syncRef.current.typeGlyph(ch, now, {
+      code, outAt: code ? null : now + GROW_IN + SPREAD + HOLD,
+    }));
   };
 
   // Start shrinking once the key is up, but let a quick tap finish growing in first.
   const release = (code) => {
     const now = performance.now();
     glyphsRef.current.forEach((g) => {
-      if (g.outAt == null && g.slot == null && (code == null || g.code === code)) g.outAt = Math.max(now, g.start + GROW_IN);
+      if (g.outAt == null && g.code != null && (code == null || g.code === code)) g.outAt = Math.max(now, g.start + GROW_IN);
     });
   };
+
+  // Write mode: edit the text that stays on the page.
+  const edit = (fn) => {
+    const t = fn(textRef.current);
+    textRef.current = t;
+    setText(t);
+    savePref("halftone-write", t);
+    syncRef.current.syncWrite();
+  };
+  const removeLast = (t) => [...t].slice(0, -1).join("");
 
   const pickShape = (id) => {
     setShape(id);
@@ -499,24 +693,37 @@ function HalftoneStage() {
 
   const pickMode = (id) => {
     if (id === modeRef.current) return;
+    const now = performance.now();
+    glyphsRef.current.forEach((g) => { if (g.outAt == null || g.outAt > now) g.outAt = now; });
     modeRef.current = id;
     setMode(id);
     savePref("halftone-mode", id);
+    const d = densitiesRef.current[id];
+    springRef.current.target = d;
+    setDensityState(d);
     if (id === "type") {
       const ch = lastTypedRef.current.trim() ? lastTypedRef.current : "a";
-      glyphsRef.current = [{ ch, cover: null, start: performance.now(), outAt: null }];
+      glyphsRef.current.push(syncRef.current.typeGlyph(ch, now));
       setCurrent(ch);
     }
-    regridRef.current();
+    syncRef.current.tickClock();
+    syncRef.current.syncWrite();
   };
 
   useEffect(() => {
     const onKey = (e) => {
       if (e.metaKey || e.ctrlKey || e.altKey) return;
-      if (modeRef.current !== "type") return;
-      if (e.key && [...e.key].length === 1) {
+      if (e.target && e.target.type === "range" && e.key.startsWith("Arrow")) return;
+      const m = modeRef.current;
+      const printable = e.key && [...e.key].length === 1;
+      if (m === "type" && printable) {
         e.preventDefault();
         if (!e.repeat) play(e.key, e.code || e.key);
+      } else if (m === "write") {
+        if (printable) { e.preventDefault(); edit((t) => t + e.key); }
+        else if (e.key === "Enter") { e.preventDefault(); edit((t) => t + "\n"); }
+        else if (e.key === "Backspace") { e.preventDefault(); edit(removeLast); }
+        else if (e.key === "Escape") { e.preventDefault(); edit(() => ""); }
       }
     };
     const onKeyUp = (e) => release(e.code || e.key);
@@ -531,32 +738,49 @@ function HalftoneStage() {
     };
   }, []);
 
-  // Phone keyboards report most keys as "Unidentified", so read them from a hidden input.
+  // Phone keyboards report most keys as "Unidentified", so read them from a hidden
+  // input that always holds one space: losing it means backspace, extra text means typing.
   const onInput = (e) => {
-    const chars = [...e.target.value];
-    e.target.value = "";
-    if (chars.length) play(chars[chars.length - 1]);
+    const v = e.target.value;
+    e.target.value = " ";
+    if (v.length === 0) {
+      if (modeRef.current === "write") edit(removeLast);
+      return;
+    }
+    const chars = [...v.slice(1)];
+    if (!chars.length) return;
+    if (modeRef.current === "write") edit((t) => t + chars.join(""));
+    else play(chars[chars.length - 1]);
   };
 
+  const isClock = isClockMode(mode);
   const label = current === " " ? "space" : current;
-  const isTime = isClockMode(mode);
+  const count = [...text].filter((c) => c !== "\n").length;
   const stop = (e) => e.stopPropagation();
+  const hint = { type: "Type any key", write: "Backspace deletes · Esc clears", time: "Local time", extended: "Local time" }[mode];
 
   return h("div", {
-    className: "stage", "data-mode": mode,
-    onPointerDown: () => { if (!isTime && inputRef.current) inputRef.current.focus(); },
+    ref: stageRef, className: "stage", "data-mode": mode,
+    onPointerDown: () => {
+      const el = inputRef.current;
+      if (isClock || !el) return;
+      el.focus();
+      el.setSelectionRange(el.value.length, el.value.length);
+    },
   },
     h("canvas", {
       ref: canvasRef, role: "img",
-      "aria-label": isTime ? `Grid of ${shape} showing the time ${clock}` : `Grid of ${shape} forming the character ${label}`,
+      "aria-label": isClock ? `Grid of ${shape} showing the time ${clock}`
+        : mode === "write" ? `Grid of ${shape} spelling: ${text || "nothing yet"}`
+        : `Grid of ${shape} forming the character ${label}`,
     }),
     h("input", {
-      ref: inputRef, id: "key-capture", className: "capture", type: "text",
+      ref: inputRef, id: "key-capture", className: "capture", type: "text", defaultValue: " ",
       autoCapitalize: "off", autoComplete: "off", autoCorrect: "off", spellCheck: false,
       "aria-label": "Type a character", onInput,
     }),
     h("div", { className: "toolbar" },
-      h("div", { className: "segmented", role: "group", "aria-label": "Mode" },
+      h("div", { className: "segmented modes", role: "group", "aria-label": "Mode" },
         MODES.map((m) => h("button", {
           key: m.id, id: `mode-${m.id}`, type: "button", "aria-pressed": mode === m.id,
           onPointerDown: stop, onClick: () => pickMode(m.id),
@@ -573,10 +797,19 @@ function HalftoneStage() {
       )
     ),
     h("div", { className: "caption" },
-      isTime
-        ? h("span", null, "Halftone Type · ", h("b", null, clock))
-        : h("span", null, "Halftone Type · ", h("b", null, label)),
-      h("span", null, isTime ? "Local time" : "Type any key")
+      h("span", null, "Halftone Type · ",
+        h("b", null, isClock ? clock : mode === "write" ? `${count} character${count === 1 ? "" : "s"}` : label)),
+      h("div", { className: "scale", onPointerDown: stop, title: "Grid size: scroll or pinch to scale" },
+        h("button", { id: "grid-smaller", type: "button", "aria-label": "Smaller cells", onClick: () => setDensity(density * 1.25) },
+          h("svg", { viewBox: "0 0 12 12", "aria-hidden": "true" }, h("path", { d: MINUS }))),
+        h("input", {
+          id: "grid-scale", type: "range", min: 0, max: 100, step: 0.1, "aria-label": "Grid size",
+          value: densityToSlider(density), onChange: (e) => setDensity(sliderToDensity(+e.target.value)),
+        }),
+        h("button", { id: "grid-larger", type: "button", "aria-label": "Larger cells", onClick: () => setDensity(density / 1.25) },
+          h("svg", { viewBox: "0 0 12 12", "aria-hidden": "true" }, h("path", { d: PLUS })))
+      ),
+      h("span", { className: "hint" }, hint)
     )
   );
 }
