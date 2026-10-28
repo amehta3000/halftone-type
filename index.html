@@ -519,15 +519,16 @@ function HalftoneStage() {
           }
         }
         const square = kind === "squares";
-        const rBase = Math.max(1.4, s * 0.055);
         const rMax = s * (square ? 0.44 : 0.5);
         ctx.beginPath();
         for (let j = j0; j <= j1; j++) {
           for (let i = i0; i <= i1; i++) {
+            const v = pt[(j - j0) * nI + (i - i0)];
+            if (v < 0.01) continue;
             const x = X(i), y = Y(j);
             const f = smoothstep(s * 0.3, s * 0.75, edge(x, y));
             if (f <= 0) continue;
-            const r = (rBase + pt[(j - j0) * nI + (i - i0)] * (rMax - rBase)) * f;
+            const r = v * rMax * f;
             if (square) ctx.rect(x - r, y - r, 2 * r, 2 * r);
             else { ctx.moveTo(x + r, y); ctx.arc(x, y, r, 0, Math.PI * 2); }
           }
