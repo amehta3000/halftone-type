@@ -76,7 +76,16 @@
     color: var(--muted); pointer-events: none;
   }
   .caption > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .caption .hint { text-align: right; }
+  .caption-end { display: flex; justify-content: flex-end; align-items: center; gap: 12px; min-width: 0; }
+  .caption-end .hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .theme-toggle {
+    pointer-events: auto; width: 34px; height: 34px; flex: none; padding: 0; cursor: pointer;
+    display: grid; place-items: center; color: var(--ink);
+    background: var(--chip); border: 1px solid var(--line); border-radius: 999px;
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+  }
+  .theme-toggle svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+  .theme-toggle:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
   .caption b { color: var(--ink); font-weight: 500; font-variant-numeric: tabular-nums; }
   .scale { gap: 6px; padding: 3px 6px; }
   .scale button {
@@ -88,13 +97,14 @@
     width: clamp(90px, 18vw, 200px); margin: 0; accent-color: var(--ink); cursor: pointer;
   }
   @media (max-width: 640px) {
-    .caption { grid-template-columns: 1fr auto; }
+    .caption { grid-template-columns: 1fr auto auto; }
     .caption .hint { display: none; }
   }
   @media (max-width: 480px) {
     .shapes button span { display: none; }
-    .shapes button { padding: 8px; }
-    .modes button { padding: 6px 8px; }
+    .shapes button { padding: 7px; }
+    .modes button { padding: 6px 7px; letter-spacing: 0.04em; }
+    .caption .brand { display: none; }
   }
 </style>
 </head>
@@ -127,6 +137,7 @@ const isClockMode = (m) => m === "time" || m === "extended";
 const SHAPES = [
   { id: "dots", label: "Dots", icon: "M6 1a5 5 0 1 0 0 10A5 5 0 0 0 6 1z" },
   { id: "squares", label: "Squares", icon: "M2 2h8v8H2z" },
+  { id: "diamonds", label: "Diamonds", icon: "M6 1l5 5-5 5-5-5z" },
   { id: "tiles", label: "Tiles", icon: "M1 1h5v5H1zM6 6h5v5H6zM6 1h3a2 2 0 0 1 2 2v3H6zM1 6h5v5H3a2 2 0 0 1-2-2z" },
 ];
 
@@ -324,6 +335,20 @@ const SPAN = Math.log(DENSITY_MAX / DENSITY_MIN);
 const densityToSlider = (d) => (Math.log(DENSITY_MAX / d) / SPAN) * 100;
 const sliderToDensity = (v) => DENSITY_MAX * Math.exp((-v / 100) * SPAN);
 
+// Light or dark: an explicit choice is stored and set on the root element; otherwise follow the system.
+const THEMES = [{ id: "light" }, { id: "dark" }];
+const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
+function effectiveTheme() {
+  const t = document.documentElement.getAttribute("data-theme");
+  return t === "light" || t === "dark" ? t : darkQuery.matches ? "dark" : "light";
+}
+{
+  const stored = loadPref("halftone-theme", THEMES, null);
+  if (stored) document.documentElement.setAttribute("data-theme", stored);
+}
+const SUN = "M8 5a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM8 1.5V3M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1.06 1.06M11.54 11.54l1.06 1.06M3.4 12.6l1.06-1.06M11.54 4.46l1.06-1.06";
+const MOON = "M13.5 9.6A5.6 5.6 0 0 1 6.4 2.5a5.6 5.6 0 1 0 7.1 7.1z";
+
 const MINUS = "M2 5.25h8v1.5H2z";
 const PLUS = "M5.25 2h1.5v3.25H10v1.5H6.75V10h-1.5V6.75H2v-1.5h3.25z";
 
@@ -336,6 +361,7 @@ function HalftoneStage() {
   const [current, setCurrent] = useState("a");
   const [clock, setClock] = useState(() => formatClock(new Date()));
   const [shape, setShape] = useState(() => loadPref("halftone-shape", SHAPES, "dots"));
+  const [theme, setTheme] = useState(effectiveTheme);
   const [mode, setMode] = useState(() => loadPref("halftone-mode", MODES, "type"));
   const [text, setText] = useState(() => { const t = loadJSON("halftone-write", ""); return typeof t === "string" ? t : ""; });
   const densitiesRef = useRef({ ...DEFAULT_DENSITY, ...loadJSON("halftone-density", {}) });
@@ -518,8 +544,8 @@ function HalftoneStage() {
             }
           }
         }
-        const square = kind === "squares";
-        const rMax = s * (square ? 0.44 : 0.5);
+        const square = kind === "squares", diamond = kind === "diamonds";
+        const rMax = s * (square ? 0.44 : diamond ? 0.58 : 0.5);
         ctx.beginPath();
         for (let j = j0; j <= j1; j++) {
           for (let i = i0; i <= i1; i++) {
@@ -530,6 +556,7 @@ function HalftoneStage() {
             if (f <= 0) continue;
             const r = v * rMax * f;
             if (square) ctx.rect(x - r, y - r, 2 * r, 2 * r);
+            else if (diamond) { ctx.moveTo(x, y - r); ctx.lineTo(x + r, y); ctx.lineTo(x, y + r); ctx.lineTo(x - r, y); ctx.closePath(); }
             else { ctx.moveTo(x + r, y); ctx.arc(x, y, r, 0, Math.PI * 2); }
           }
         }
@@ -650,6 +677,15 @@ function HalftoneStage() {
     };
   }, []);
 
+  // Keep the sun/moon icon right when the system theme or the host's theme changes.
+  useEffect(() => {
+    const sync = () => setTheme(effectiveTheme());
+    darkQuery.addEventListener("change", sync);
+    const mo = new MutationObserver(sync);
+    mo.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    return () => { darkQuery.removeEventListener("change", sync); mo.disconnect(); };
+  }, []);
+
   const setDensityRef = useRef(setDensity);
   setDensityRef.current = setDensity;
 
@@ -758,6 +794,12 @@ function HalftoneStage() {
   const label = current === " " ? "space" : current;
   const count = [...text].filter((c) => c !== "\n").length;
   const stop = (e) => e.stopPropagation();
+  const toggleTheme = () => {
+    const next = theme === "dark" ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", next);
+    savePref("halftone-theme", next);
+    setTheme(next);
+  };
   const hint = { type: "Type any key", write: "Backspace deletes · Esc clears", time: "Local time", extended: "Local time" }[mode];
 
   return h("div", {
@@ -798,7 +840,7 @@ function HalftoneStage() {
       )
     ),
     h("div", { className: "caption" },
-      h("span", null, "Halftone Type · ",
+      h("span", null, h("span", { className: "brand" }, "Halftone Type · "),
         h("b", null, isClock ? clock : mode === "write" ? `${count} character${count === 1 ? "" : "s"}` : label)),
       h("div", { className: "scale", onPointerDown: stop, title: "Grid size: scroll or pinch to scale" },
         h("button", { id: "grid-smaller", type: "button", "aria-label": "Smaller cells", onClick: () => setDensity(density * 1.25) },
@@ -810,7 +852,14 @@ function HalftoneStage() {
         h("button", { id: "grid-larger", type: "button", "aria-label": "Larger cells", onClick: () => setDensity(density / 1.25) },
           h("svg", { viewBox: "0 0 12 12", "aria-hidden": "true" }, h("path", { d: PLUS })))
       ),
-      h("span", { className: "hint" }, hint)
+      h("div", { className: "caption-end" },
+        h("span", { className: "hint" }, hint),
+        h("button", {
+          id: "theme-toggle", className: "theme-toggle", type: "button", onPointerDown: stop, onClick: toggleTheme,
+          "aria-label": theme === "dark" ? "Switch to light mode" : "Switch to dark mode",
+          title: theme === "dark" ? "Light mode" : "Dark mode",
+        }, h("svg", { viewBox: "0 0 16 16", "aria-hidden": "true" }, h("path", { d: theme === "dark" ? SUN : MOON })))
+      )
     )
   );
 }
